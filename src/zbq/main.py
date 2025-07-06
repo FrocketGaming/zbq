@@ -1,5 +1,7 @@
 from polars.exceptions import PolarsError
 from google.cloud import bigquery
+from google.auth.exceptions import DefaultCredentialsError
+from google.auth import default as get_google_credentials
 import polars as pl
 import tempfile
 import os
@@ -9,6 +11,13 @@ import subprocess
 class BigQueryHandler:
     def __init__(self):
         self._project_id = self._get_default_project()
+        if not self._check_adc():
+            print(
+                "No Google Cloud credentials found. Run:\n"
+                "gcloud auth application-default login to configure Application Default Credentials.\n"
+                "Or set the GOOGLE_APPLICATION_CREDENTIALS env variable."
+                )
+            exit()
         if not self.project_id:
             print(
                 "No default GCP project found. Please either:\n"
@@ -17,6 +26,13 @@ class BigQueryHandler:
             )
             exit()
         self.client = self._init_client()
+
+    def _check_adc(self):
+        try:
+            creds, project = get_google_credentials()
+            return True
+        except DefaultCredentialsError:
+            return False
 
     def _get_default_project(self):
         try:
