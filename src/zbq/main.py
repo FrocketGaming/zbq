@@ -3,6 +3,7 @@ from google.cloud import bigquery
 from google.auth.exceptions import DefaultCredentialsError
 from google.auth import default as get_google_credentials
 import polars as pl
+import re
 import tempfile
 import os
 import configparser
@@ -56,7 +57,7 @@ class BigQueryHandler:
         self._client = bigquery.Client(project=self.project_id)
 
     @property
-    def client(self):
+    def client(self) -> bigquery.Client:
         if self._client is None:
             self._init_client()
         return self._client
@@ -87,15 +88,9 @@ class BigQueryHandler:
         if not self.project_id:
             raise RuntimeError("Project ID not set.")
 
-    def bq(
+    def read(
         self,
-        action: str,
-        df: pl.DataFrame | None = None,
         query: str | None = None,
-        full_table_path: str | None = None,
-        write_type: str = "append",
-        warning: bool = True,
-        create_if_needed: bool = True,
     ):
         """
         Handles CRUD-style operations with BigQuery via a unified interface.
@@ -103,11 +98,7 @@ class BigQueryHandler:
         Args:
             action (str): One of {"read", "write", "insert", "delete"}.
             df (pl.DataFrame, optional): Polars DataFrame to write to BigQuery. Required for "write".
-            full_table_path (str, optional): Fully-qualified table path. Required for "write".
             query (str, optional): SQL query string. Required for "read", "insert", and "delete".
-            write_type (str, optional): "append" or "truncate". Default is "append".
-            warning (bool, optional): Whether to prompt before truncating a table. Default is True.
-            create_if_needed (bool, optional): Whether to create the table if it doesn't exist. Default is True.
 
         Returns:
             pl.DataFrame or str: A Polars DataFrame for "read", or a job state string for "write".
@@ -117,17 +108,29 @@ class BigQueryHandler:
             RuntimeError: If authentication or project configuration is missing.
         """
 
-        match action.lower():
-            case "read" | "insert" | "delete":
-                if query:
-                    return self._query(query)
-                else:
-                    raise ValueError("Query is empty.")
-            case "write":
-                self._check_requirements(df, full_table_path)
-                return self._write(
-                    df, full_table_path, write_type, warning, create_if_needed
-                )
+        if query:
+            return self._query(query)
+        else:
+            raise ValueError("Query is empty.")
+    
+    def insert(self, query: str):
+        self.read(query)
+    
+    def update(self, query: str):
+        self.read(query)
+    
+    def delete(self, query: str):
+        self.read(query)
+
+    def write(
+        self,
+        df: pl.DataFrame,
+        full_table_path: str,
+        write_type: str = "append",
+        warning: bool = True,
+        create_if_needed: bool = True):
+        self._check_requirements(df, full_table_path)
+        return self._write(df, full_table_path, write_type, warning, create_if_needed)
 
     def _check_requirements(self, df, full_table_path):
         if df.is_empty() or not full_table_path:
@@ -138,9 +141,15 @@ class BigQueryHandler:
                 missing.append("full_table_path")
             raise ValueError(f"Missing required argument(s): {', '.join(missing)}")
 
-    def _query(self, query: str) -> pl.DataFrame:
+    def _query(self, query: str) -> pl.DataFrame | pl.Series:
         try:
             query_job = self.client.query(query)
+
+            if re.search(r"\b(insert|update|delete)\b", query, re.IGNORECASE):
+                query_job.result()
+                return pl.DataFrame(
+                {"status": ["OK"], "job_id": [query_job.job_id]}
+            )
             rows = query_job.result().to_arrow(progress_bar_type="tqdm")
             df = pl.from_arrow(rows)
         except PolarsError as e:
@@ -149,6 +158,7 @@ class BigQueryHandler:
             query_job = self.client.query(query)
             df = query_job.result().to_dataframe(progress_bar_type="tqdm")
             df = pl.from_pandas(df)
+
         return df
 
     def _write(
