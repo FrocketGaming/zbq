@@ -90,7 +90,7 @@ class BigQueryHandler:
         df: pl.DataFrame | None = None,
         query: str | None = None,
         full_table_path: str | None = None,
-        write_type: str = "WRITE_APPEND",
+        write_type: str = "append",
         warning: bool = True,
         create_if_needed: bool = True,
     ):
@@ -102,7 +102,7 @@ class BigQueryHandler:
             df (pl.DataFrame, optional): Polars DataFrame to write to BigQuery. Required for "write".
             full_table_path (str, optional): Fully-qualified table path. Required for "write".
             query (str, optional): SQL query string. Required for "read", "insert", and "delete".
-            write_type (str, optional): "WRITE_APPEND" or "WRITE_TRUNCATE". Default is "WRITE_APPEND".
+            write_type (str, optional): "append" or "truncate". Default is "append".
             warning (bool, optional): Whether to prompt before truncating a table. Default is True.
             create_if_needed (bool, optional): Whether to create the table if it doesn't exist. Default is True.
 

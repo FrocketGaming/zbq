@@ -22,9 +22,7 @@ results = zclient(action="read", query)
 zclient.bq(
     action="write",
     df=df,
-    project_id="project",
-    dataset="dataset",
-    table="table",
+    full_table_path="project.dataset.table",
     write_type="truncate",
     warning=True
 )
