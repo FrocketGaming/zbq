@@ -5,7 +5,7 @@ from google.auth import default as get_google_credentials
 import polars as pl
 import tempfile
 import os
-import subprocess
+import configparser
 
 
 class BigQueryHandler:
@@ -13,26 +13,29 @@ class BigQueryHandler:
         self._project_id = project_id.strip() or self._get_default_project()
         self._client = None  # Lazy init
 
-    def _get_default_project(self) -> str:
-        try:
-            result = subprocess.run(
-                ["gcloud", "config", "get", "project"],
-                capture_output=True,
-                text=True,
-                check=True,
+    def _get_default_project(self):
+        config_path = os.path.expanduser(
+            "~/.config/gcloud/configurations/config_default"
+        )
+        if os.name == "nt":  # Windows
+            config_path = os.path.expandvars(
+                r"%APPDATA%\gcloud\configurations\config_default"
             )
-            project = result.stdout.strip()
-            if project:
-                return project
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
+
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(config_path)
+            project = parser.get("core", "project", fallback="")
+            return project.strip()
+        except Exception:
+            return os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
 
         # Fallback to environment
         return os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
 
     def _check_adc(self) -> bool:
         try:
-            get_google_credentials()
+            creds, proj = get_google_credentials()
             return True
         except DefaultCredentialsError:
             return False
@@ -126,9 +129,13 @@ class BigQueryHandler:
                     df, full_table_path, write_type, warning, create_if_needed
                 )
 
-    def _check_requirements(self, **kwargs):
-        missing = [k for k, v in kwargs.items() if not v]
-        if missing:
+    def _check_requirements(self, df, full_table_path):
+        if df.is_empty() or not full_table_path:
+            missing = []
+            if df.is_empty():
+                missing.append("df")
+            if not full_table_path:
+                missing.append("full_table_path")
             raise ValueError(f"Missing required argument(s): {', '.join(missing)}")
 
     def _query(self, query: str) -> pl.DataFrame:
