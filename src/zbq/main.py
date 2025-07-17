@@ -78,25 +78,21 @@ class BigQueryHandler:
     def validate(self):
         """Optional helper: raise if ADC or project_id not set"""
         if not self._check_adc():
-            raise RuntimeError("Missing ADC. Run: gcloud auth application-default login")
+            raise RuntimeError(
+                "Missing ADC. Run: gcloud auth application-default login"
+            )
         if not self.project_id:
             raise RuntimeError("Project ID not set.")
-
-    def _full_table_path(self, dataset: str, table: str) -> str:
-        if not isinstance(dataset, str) or not isinstance(table, str):
-            raise ValueError("Dataset and table must be strings")
-        return f"{self.project_id}.{dataset}.{table}"
 
     def bq(
         self,
         action: str,
         df: pl.DataFrame | None = None,
-        dataset: str = "",
-        table: str = "",
-        query: str = "",
+        query: str | None = None,
+        full_table_path: str | None = None,
         write_type: str = "WRITE_APPEND",
         warning: bool = True,
-        create_if_needed: bool = True
+        create_if_needed: bool = True,
     ):
         """
         Handles CRUD-style operations with BigQuery via a unified interface.
@@ -104,8 +100,7 @@ class BigQueryHandler:
         Args:
             action (str): One of {"read", "write", "insert", "delete"}.
             df (pl.DataFrame, optional): Polars DataFrame to write to BigQuery. Required for "write".
-            dataset (str, optional): Dataset name. Required for "write".
-            table (str, optional): Table name. Required for "write".
+            full_table_path (str, optional): Fully-qualified table path. Required for "write".
             query (str, optional): SQL query string. Required for "read", "insert", and "delete".
             write_type (str, optional): "WRITE_APPEND" or "WRITE_TRUNCATE". Default is "WRITE_APPEND".
             warning (bool, optional): Whether to prompt before truncating a table. Default is True.
@@ -126,8 +121,10 @@ class BigQueryHandler:
                 else:
                     raise ValueError("Query is empty.")
             case "write":
-                self._check_requirements(df, dataset, table)
-                return self._write(df, dataset, table, write_type, warning, create_if_needed)
+                self._check_requirements(df, full_table_path)
+                return self._write(
+                    df, full_table_path, write_type, warning, create_if_needed
+                )
 
     def _check_requirements(self, **kwargs):
         missing = [k for k, v in kwargs.items() if not v]
@@ -150,13 +147,12 @@ class BigQueryHandler:
     def _write(
         self,
         df: pl.DataFrame,
-        dataset: str,
-        table: str,
-        write_type: str = "WRITE_APPEND",
+        full_table_path: str,
+        write_type: str = "append",
         warning: bool = True,
-        create_if_needed: bool = True
+        create_if_needed: bool = True,
     ):
-        destination = self._full_table_path(dataset, table)
+        destination = full_table_path
         temp_file = tempfile.NamedTemporaryFile(suffix=".parquet", delete=False)
         temp_file_path = temp_file.name
         temp_file.close()
@@ -164,7 +160,7 @@ class BigQueryHandler:
         try:
             df.write_parquet(temp_file_path)
 
-            if write_type == "WRITE_TRUNCATE" and warning:
+            if write_type == "truncate" and warning:
                 user_warning = input(
                     "You are about to overwrite a table. Continue? (y/n): "
                 )
@@ -173,7 +169,7 @@ class BigQueryHandler:
 
             write_disp = (
                 bigquery.WriteDisposition.WRITE_TRUNCATE
-                if write_type == "WRITE_TRUNCATE"
+                if write_type == "truncate"
                 else bigquery.WriteDisposition.WRITE_APPEND
             )
 
