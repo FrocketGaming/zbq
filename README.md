@@ -16,11 +16,13 @@ from zbq import zclient
 query = "select * from project.dataset.table"
 
 # Read, Update, Insert, Delete
-results = zclient(action="read", query)
+results = zclient.read(query)
+zclient.update(query)
+zclient.delete(query)
+zclient.insert(query)
 
 # Write data
-zclient.bq(
-    action="write",
+zclient.write(
     df=df,
     full_table_path="project.dataset.table",
     write_type="truncate",
