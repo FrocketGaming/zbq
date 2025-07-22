@@ -1,5 +1,6 @@
-from .main import BigQueryHandler
+from .main import BigQueryHandler, StorageHandler
 
 zclient = BigQueryHandler()
+zstorage = StorageHandler()
 
-__all__ = ["zclient"]
+__all__ = ["zclient", "zstorage"]

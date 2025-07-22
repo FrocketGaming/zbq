@@ -1,5 +1,5 @@
 from polars.exceptions import PolarsError
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 from google.auth.exceptions import DefaultCredentialsError
 from google.auth import default as get_google_credentials
 import polars as pl
@@ -8,11 +8,12 @@ import tempfile
 import os
 import configparser
 
-
-class BigQueryHandler:
-    def __init__(self, project_id: str = ""):
-        self._project_id = project_id.strip() or self._get_default_project()
-        self._client = None  # Lazy init
+class BaseClientManager:
+    def __init__(self):
+        self._client = None # Lazy init
+    
+    def _create_client(self):
+        raise NotImplementedError("Subclasses must implement _create_client()")
 
     def _get_default_project(self):
         config_path = os.path.expanduser(
@@ -34,6 +35,12 @@ class BigQueryHandler:
         # Fallback to environment
         return os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
 
+    @property
+    def client(self):
+        if self._client is None:
+            self._init_client()
+        return self._client
+
     def _check_adc(self) -> bool:
         try:
             creds, proj = get_google_credentials()
@@ -54,19 +61,8 @@ class BigQueryHandler:
                 "  gcloud config set project YOUR_PROJECT_ID\n"
                 "Or set manually: zclient.project_id = 'your-project'"
             )
-        self._client = bigquery.Client(project=self.project_id)
-
-    @property
-    def client(self) -> bigquery.Client:
-        if self._client is None:
-            self._init_client()
-        return self._client
-
-    def _close_client(self):
-        if self._client:
-            self._client.close()
-            self._client = None
-
+        self._client = self._create_client()
+    
     @property
     def project_id(self):
         return self._project_id
@@ -78,6 +74,55 @@ class BigQueryHandler:
         if id != self._project_id:
             self._project_id = id
             self._close_client()
+
+class StorageHandler(BaseClientManager):
+    def __init__(self, project_id: str = ""):
+        self._client = None # Lazy init
+        self._project_id = project_id.strip() or self._get_default_project()
+    
+    def download(self, bucket_name: str, file_name: str, file_extension: str, prefix: str, local_dir: str):
+        bucket = self.client.bucket(bucket_name)
+        blobs = bucket.list_blobs(prefix=prefix, max_results=100)
+
+        for blob in blobs:
+            # Compute relative path
+            relative_path = blob.name[len(prefix):]
+            if not relative_path:  # skip "directory marker" blobs
+                continue
+            local_path = os.path.join(local_dir, relative_path)
+
+            # Ensure the directory exists
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+            blob.download_to_filename(local_path)
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._init_client()
+        return self._client
+
+    def _create_client(self):
+        return storage.Client(project=self.project_id)
+
+class BigQueryHandler(BaseClientManager):
+    def __init__(self, project_id: str = ""):
+        self._project_id = project_id.strip() or self._get_default_project()
+        self._client = None  # Lazy init
+
+    @property
+    def client(self) -> bigquery.Client:
+        if self._client is None:
+            self._init_client()
+        return self._client
+
+    def _close_client(self):
+        if self._client:
+            self._client.close()
+            self._client = None
+    
+    def _create_client(self):
+        return bigquery.Client(project=self.project_id)
 
     def validate(self):
         """Optional helper: raise if ADC or project_id not set"""
