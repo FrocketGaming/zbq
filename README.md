@@ -11,6 +11,7 @@ A lightweight, wrapper around Google Cloud BigQuery with Polars integration. Sim
 
 ## Examples:
 ```SQL
+# BigQuery
 from zbq import zclient
 
 query = "select * from project.dataset.table"
@@ -27,5 +28,17 @@ zclient.write(
     full_table_path="project.dataset.table",
     write_type="truncate",
     warning=True
+)
+
+---
+
+# Storage
+from zbq import zstorage
+
+# Downloads all .json files within the bucket to local current directory.
+zstorage.download(
+    bucket_name="name",
+    file_extension=".json",
+    local_dir="."
 )
 ```
