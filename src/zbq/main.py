@@ -13,10 +13,42 @@ from contextlib import contextmanager
 
 class BaseClientManager:
     def __init__(self):
-        self._client = None  # Lazy init
+        pass
 
     def _create_client(self):
         raise NotImplementedError("Subclasses must implement _create_client()")
+
+    @contextmanager
+    def _fresh_client(self):
+        """Context manager that provides a fresh client for each operation.
+        
+        This eliminates shared client state issues by creating a new client
+        for each operation and ensuring proper cleanup.
+        """
+        temp_client = None
+        try:
+            if not self._check_adc():
+                raise RuntimeError(
+                    "No Google Cloud credentials found. Run:\n"
+                    "  gcloud auth application-default login\n"
+                    "Or set the GOOGLE_APPLICATION_CREDENTIALS environment variable."
+                )
+            if not self.project_id:
+                raise RuntimeError(
+                    "No GCP project found. Set one via:\n"
+                    "  gcloud config set project YOUR_PROJECT_ID\n"
+                    "Or set manually: zclient.project_id = 'your-project'"
+                )
+            
+            temp_client = self._create_client()
+            yield temp_client
+            
+        finally:
+            if temp_client:
+                try:
+                    temp_client.close()
+                except Exception:
+                    pass  # Ignore cleanup errors
 
     def _get_default_project(self):
         config_path = os.path.expanduser(
@@ -51,21 +83,6 @@ class BaseClientManager:
         except DefaultCredentialsError:
             return False
 
-    def _init_client(self):
-        if not self._check_adc():
-            raise RuntimeError(
-                "No Google Cloud credentials found. Run:\n"
-                "  gcloud auth application-default login\n"
-                "Or set the GOOGLE_APPLICATION_CREDENTIALS environment variable."
-            )
-        if not self.project_id:
-            raise RuntimeError(
-                "No GCP project found. Set one via:\n"
-                "  gcloud config set project YOUR_PROJECT_ID\n"
-                "Or set manually: zclient.project_id = 'your-project'"
-            )
-        self._client = self._create_client()
-
     @property
     def project_id(self):
         return self._project_id
@@ -76,12 +93,10 @@ class BaseClientManager:
             raise ValueError("Project ID must be a string")
         if id != self._project_id:
             self._project_id = id
-            self._close_client()
 
 
 class StorageHandler(BaseClientManager):
     def __init__(self, project_id: str = ""):
-        self._client = None  # Lazy init
         self._project_id = project_id.strip() or self._get_default_project()
 
     def download(
@@ -92,26 +107,21 @@ class StorageHandler(BaseClientManager):
         prefix: str,
         local_dir: str,
     ):
-        bucket = self.client.bucket(bucket_name)
-        blobs = bucket.list_blobs(prefix=prefix, max_results=100)
+        with self._fresh_client() as client:
+            bucket = client.bucket(bucket_name)
+            blobs = bucket.list_blobs(prefix=prefix, max_results=100)
 
-        for blob in blobs:
-            # Compute relative path
-            relative_path = blob.name[len(prefix) :]
-            if not relative_path:  # skip "directory marker" blobs
-                continue
-            local_path = os.path.join(local_dir, relative_path)
+            for blob in blobs:
+                # Compute relative path
+                relative_path = blob.name[len(prefix) :]
+                if not relative_path:  # skip "directory marker" blobs
+                    continue
+                local_path = os.path.join(local_dir, relative_path)
 
-            # Ensure the directory exists
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                # Ensure the directory exists
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-            blob.download_to_filename(local_path)
-
-    @property
-    def client(self):
-        if self._client is None:
-            self._init_client()
-        return self._client
+                blob.download_to_filename(local_path)
 
     def _create_client(self):
         return storage.Client(project=self.project_id)
@@ -125,61 +135,8 @@ class BigQueryHandler(BaseClientManager):
         interactive_mode: bool = True,
     ):
         self._project_id = project_id.strip() or self._get_default_project()
-        self._client = None  # Lazy init
         self.default_timeout = default_timeout
         self.interactive_mode = interactive_mode
-
-    @property
-    def client(self) -> bigquery.Client:
-        if self._client is None:
-            self._init_client()
-        return self._client
-
-    def _close_client(self):
-        if self._client:
-            try:
-                self._client.close()
-            except Exception:
-                pass  # Ignore errors during cleanup
-            finally:
-                self._client = None
-
-    def _refresh_client(self):
-        """Force refresh the client connection"""
-        self._close_client()
-        self._init_client()
-    
-    @contextmanager
-    def _fresh_client(self):
-        """Context manager that provides a fresh BigQuery client for each operation.
-        
-        This eliminates shared client state issues by creating a new client
-        for each operation and ensuring proper cleanup.
-        """
-        temp_client = None
-        try:
-            if not self._check_adc():
-                raise RuntimeError(
-                    "No Google Cloud credentials found. Run:\n"
-                    "  gcloud auth application-default login\n"
-                    "Or set the GOOGLE_APPLICATION_CREDENTIALS environment variable."
-                )
-            if not self.project_id:
-                raise RuntimeError(
-                    "No GCP project found. Set one via:\n"
-                    "  gcloud config set project YOUR_PROJECT_ID\n"
-                    "Or set manually: zclient.project_id = 'your-project'"
-                )
-            
-            temp_client = bigquery.Client(project=self.project_id)
-            yield temp_client
-            
-        finally:
-            if temp_client:
-                try:
-                    temp_client.close()
-                except Exception:
-                    pass  # Ignore cleanup errors
 
     def _create_client(self):
         return bigquery.Client(project=self.project_id)
@@ -391,9 +348,3 @@ class BigQueryHandler(BaseClientManager):
                     os.remove(temp_file_path)
                 except OSError:
                     pass  # Ignore cleanup errors
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self._close_client()
