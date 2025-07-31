@@ -99,6 +99,14 @@ class StorageHandler(BaseClientManager):
     def __init__(self, project_id: str = ""):
         self._project_id = project_id.strip() or self._get_default_project()
 
+    def upload(self, local_dir: str, bucket_name: str):
+        with self._fresh_client() as client:
+            bucket = client.get_bucket(bucket_name)
+            for root, _, files in os.walk(local_dir):
+                for file in files:
+                    blob = bucket.blob(os.path.join(root, file))
+                    blob.upload_from_filename(os.path.join(root, file))
+
     def download(
         self,
         bucket_name: str,
