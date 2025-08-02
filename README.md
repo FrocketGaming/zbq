@@ -310,17 +310,6 @@ zstorage.upload(
 - Google Cloud project with BigQuery and/or Storage APIs enabled
 - Appropriate IAM permissions for your operations
 
-## Migration from v0.1.7
-
-The new version maintains backward compatibility. Old method signatures still work:
-
-```python
-# Old way (still works)
-zstorage.upload("./data", "my-bucket", pattern="*.csv")
-
-# New way (recommended) 
-zstorage.upload("./data", "my-bucket", include_patterns="*.csv")
-```
 
 ## Performance Tips
 

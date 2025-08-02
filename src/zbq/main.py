@@ -348,7 +348,6 @@ class StorageHandler(BaseClientManager):
         self,
         local_dir: str,
         bucket_path: str,
-        pattern: Optional[str] = None,  # Legacy parameter for backward compatibility
         include_patterns: Optional[Union[str, List[str]]] = None,
         exclude_patterns: Optional[Union[str, List[str]]] = None,
         case_sensitive: bool = True,
@@ -365,7 +364,6 @@ class StorageHandler(BaseClientManager):
         Args:
             local_dir: Local directory path to upload from
             bucket_path: GCS bucket path (e.g., "my-bucket" or "my-bucket/folder/subfolder")
-            pattern: Legacy parameter for backward compatibility (use include_patterns instead)
             include_patterns: Pattern(s) to include (e.g., "*.xlsx", ["*.csv", "*.json"])
             exclude_patterns: Pattern(s) to exclude (e.g., "temp_*", ["*.tmp", "*.log"])
             case_sensitive: Whether pattern matching is case sensitive
@@ -379,9 +377,6 @@ class StorageHandler(BaseClientManager):
         Returns:
             UploadResult with detailed statistics
         """
-        # Handle backward compatibility with old 'pattern' parameter
-        if pattern is not None and include_patterns is None:
-            include_patterns = pattern
 
         # Parse bucket path into bucket name and prefix
         bucket_name, prefix = parse_bucket_path(bucket_path)
@@ -567,7 +562,6 @@ class StorageHandler(BaseClientManager):
         self,
         bucket_path: str,
         local_dir: str,
-        prefix: str = "",  # Deprecated - use bucket_path instead
         include_patterns: Optional[Union[str, List[str]]] = None,
         exclude_patterns: Optional[Union[str, List[str]]] = None,
         case_sensitive: bool = True,
@@ -585,7 +579,6 @@ class StorageHandler(BaseClientManager):
         Args:
             bucket_path: GCS bucket path (e.g., "my-bucket" or "my-bucket/folder/subfolder")
             local_dir: Local directory to download files to
-            prefix: Deprecated - use bucket_path instead (kept for backward compatibility)
             include_patterns: Pattern(s) to include (e.g., "*.xlsx", ["*.csv", "*.json"])
             exclude_patterns: Pattern(s) to exclude (e.g., "temp_*", ["*.tmp", "*.log"])
             case_sensitive: Whether pattern matching is case sensitive
@@ -600,14 +593,8 @@ class StorageHandler(BaseClientManager):
         Returns:
             DownloadResult with detailed statistics
         """
-        # Parse bucket path and handle backward compatibility
-        bucket_name, path_prefix = parse_bucket_path(bucket_path)
-
-        # If old prefix parameter is provided, combine with path_prefix
-        if prefix:
-            combined_prefix = f"{path_prefix}{prefix}" if path_prefix else prefix
-        else:
-            combined_prefix = path_prefix
+        # Parse bucket path
+        bucket_name, combined_prefix = parse_bucket_path(bucket_path)
 
         start_time = time.time()
         local_path = Path(local_dir)
@@ -789,20 +776,6 @@ class StorageHandler(BaseClientManager):
 
     def _create_client(self):
         return storage.Client(project=self.project_id)
-
-    # Backward compatibility methods
-    def upload_to_bucket(
-        self, local_dir: str, bucket_name: str, pattern: Optional[str] = None, **kwargs
-    ) -> UploadResult:
-        """Backward compatibility method - use upload() instead"""
-        return self.upload(local_dir, bucket_name, pattern=pattern, **kwargs)
-
-    def download_from_bucket(
-        self, bucket_name: str, local_dir: str, prefix: str = "", **kwargs
-    ) -> DownloadResult:
-        """Backward compatibility method - use download() instead"""
-        bucket_path = f"{bucket_name}/{prefix}" if prefix else bucket_name
-        return self.download(bucket_path, local_dir, **kwargs)
 
 
 class BigQueryHandler(BaseClientManager):
