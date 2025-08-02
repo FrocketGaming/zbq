@@ -676,25 +676,15 @@ class StorageHandler(BaseClientManager):
             result.duration = time.time() - start_time
             return result
 
-        # Auto-detect progress bar display
-        if show_progress is None:
-            show_progress = len(blobs_to_download) > 1 and not dry_run
-
-        # Download files with progress tracking
-        with ProgressBarWrapper(
-            total=len(blobs_to_download),
-            show_progress=show_progress,
-            description="Downloading",
-            custom_callback=progress_callback
-        ) as progress:
-            if parallel and len(blobs_to_download) > 1:
-                result = self._download_parallel(
-                    blobs_to_download, result, progress.update, max_retries
-                )
-            else:
-                result = self._download_sequential(
-                    blobs_to_download, result, progress.update, max_retries
-                )
+        # Download files
+        if parallel and len(blobs_to_download) > 1:
+            result = self._download_parallel(
+                blobs_to_download, result, progress_callback, max_retries
+            )
+        else:
+            result = self._download_sequential(
+                blobs_to_download, result, progress_callback, max_retries
+            )
 
         result.duration = time.time() - start_time
         self.logger.info(

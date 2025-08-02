@@ -15,6 +15,7 @@ A lightweight, enhanced wrapper around Google Cloud BigQuery and Storage with Po
 ### Storage Operations  
 * **Advanced pattern matching** - Multiple include/exclude patterns, regex support, case-insensitive matching
 * **Parallel uploads/downloads** - Configurable thread pool for better performance
+* **Built-in progress bars** - Automatic visual progress tracking with tqdm
 * **Progress tracking** - Built-in callbacks and detailed operation statistics
 * **Dry-run mode** - Preview operations without executing
 * **Retry logic** - Automatic retry with exponential backoff for failed operations  
@@ -58,21 +59,35 @@ zclient.delete("DELETE FROM `project.dataset.table` WHERE id = 1")
 ```python
 from zbq import zstorage
 
-# Simple upload with pattern
+# Simple upload with pattern - files go to bucket root
 result = zstorage.upload(
     local_dir="./data",
-    bucket_name="my-bucket",
+    bucket_path="my-bucket",
     include_patterns="*.xlsx"  # Upload only Excel files
+)
+
+# Upload to specific folder in bucket
+result = zstorage.upload(
+    local_dir="./data", 
+    bucket_path="my-bucket/reports/2024",  # Upload to reports/2024/ folder
+    include_patterns="*.xlsx"
 )
 
 print(f"Uploaded {result.uploaded_files}/{result.total_files} files")
 print(f"Total size: {result.total_bytes:,} bytes in {result.duration:.2f}s")
 
-# Simple download  
+# Simple download from bucket root
 result = zstorage.download(
-    bucket_name="my-bucket", 
+    bucket_path="my-bucket", 
     local_dir="./downloads",
     include_patterns="*.csv"  # Download only CSV files
+)
+
+# Download from specific folder in bucket
+result = zstorage.download(
+    bucket_path="my-bucket/data/exports",  # Download from data/exports/ folder
+    local_dir="./downloads",
+    include_patterns="*.csv"
 )
 ```
 
@@ -81,7 +96,7 @@ result = zstorage.download(
 # Multiple include patterns
 result = zstorage.upload(
     local_dir="./reports",
-    bucket_name="my-bucket", 
+    bucket_path="my-bucket/reports", 
     include_patterns=["*.xlsx", "*.csv", "*.json"],  # Multiple file types
     exclude_patterns=["temp_*", "*_backup.*"],       # Exclude temporary/backup files
     case_sensitive=False  # Case-insensitive matching
@@ -90,7 +105,7 @@ result = zstorage.upload(
 # Regex patterns for complex matching
 result = zstorage.upload(
     local_dir="./logs",
-    bucket_name="my-bucket",
+    bucket_path="my-bucket/logs",
     include_patterns=r"log_\d{4}-\d{2}-\d{2}\.txt",  # Match log_YYYY-MM-DD.txt
     use_regex=True
 )
@@ -98,27 +113,36 @@ result = zstorage.upload(
 
 #### Parallel Processing & Progress Tracking
 ```python
-def progress_callback(completed, total):
-    percentage = (completed / total) * 100
-    print(f"Progress: {completed}/{total} files ({percentage:.1f}%)")
-
-# Parallel upload with progress tracking
+# Automatic progress bar (shows for multiple files)
 result = zstorage.upload(
     local_dir="./large-dataset", 
-    bucket_name="my-bucket",
+    bucket_path="my-bucket",
+    include_patterns="*.xlsx",
     parallel=True,                    # Enable parallel uploads
-    progress_callback=progress_callback,
     max_retries=5                     # Retry failed uploads
+)
+# Shows: "Uploading: 75%|███████▌  | 15/20 [00:30<00:10, 0.5files/s]"
+
+# Custom progress callback (optional)
+def progress_callback(completed, total):
+    percentage = (completed / total) * 100
+    print(f"Custom progress: {completed}/{total} files ({percentage:.1f}%)")
+
+result = zstorage.upload(
+    local_dir="./large-dataset", 
+    bucket_path="my-bucket",
+    progress_callback=progress_callback,
+    show_progress=False               # Disable built-in progress bar
 )
 
 # Handle results
 if result.failed_files > 0:
-    print(f"⚠️  {result.failed_files} files failed to upload:")
+    print(f"WARNING: {result.failed_files} files failed to upload:")
     for error in result.errors:
         print(f"  - {error}")
 
-print(f"✅ Successfully uploaded {result.uploaded_files} files")
-print(f"📊 Total: {result.total_bytes:,} bytes in {result.duration:.2f}s")
+print(f"Successfully uploaded {result.uploaded_files} files")
+print(f"Total: {result.total_bytes:,} bytes in {result.duration:.2f}s")
 ```
 
 #### Dry Run & Preview
@@ -126,21 +150,35 @@ print(f"📊 Total: {result.total_bytes:,} bytes in {result.duration:.2f}s")
 # Preview what would be uploaded without actually uploading
 result = zstorage.upload(
     local_dir="./data",
-    bucket_name="my-bucket", 
+    bucket_path="my-bucket", 
     include_patterns="*.parquet",
     dry_run=True  # Preview only
 )
 
 print(f"Would upload {result.total_files} files ({result.total_bytes:,} bytes)")
+
+# Progress bar control
+result = zstorage.upload(
+    local_dir="./data",
+    bucket_path="my-bucket",
+    include_patterns="*.xlsx", 
+    show_progress=True     # Force show progress bar even for single files
+)
+
+result = zstorage.upload(
+    local_dir="./data",
+    bucket_path="my-bucket", 
+    include_patterns="*.xlsx",
+    show_progress=False    # Never show progress bar
+)
 ```
 
 #### Advanced Download with Filtering
 ```python  
-# Download with prefix filtering and patterns
+# Download with path filtering and patterns
 result = zstorage.download(
-    bucket_name="my-data-bucket",
+    bucket_path="my-data-bucket/reports/2024",  # Only files under this path
     local_dir="./downloaded-reports", 
-    prefix="reports/2024/",           # Only files under this prefix
     include_patterns=["*.xlsx", "*.pdf"],
     exclude_patterns="*_draft.*",     # Skip draft files
     parallel=True,
@@ -200,19 +238,19 @@ result: UploadResult = zstorage.upload(
 # Detailed statistics
 print(f"""
 Upload Summary:
-📁 Total files: {result.total_files}
-✅ Uploaded: {result.uploaded_files} 
-⏭️  Skipped: {result.skipped_files}
-❌ Failed: {result.failed_files}
-📊 Total size: {result.total_bytes:,} bytes
-⏱️  Duration: {result.duration:.2f} seconds
+Total files: {result.total_files}
+Uploaded: {result.uploaded_files} 
+Skipped: {result.skipped_files}
+Failed: {result.failed_files}
+Total size: {result.total_bytes:,} bytes
+Duration: {result.duration:.2f} seconds
 """)
 
 # Handle errors
 if result.errors:
     print("Errors encountered:")
     for error in result.errors[:5]:  # Show first 5 errors
-        print(f"  • {error}")
+        print(f"  - {error}")
     if len(result.errors) > 5:
         print(f"  ... and {len(result.errors) - 5} more errors")
 ```

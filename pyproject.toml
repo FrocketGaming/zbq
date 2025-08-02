@@ -1,6 +1,6 @@
 [project]
 name = "zbq"
-version = "0.1.9"
+version = "0.2.1"
 description = "A lightweight, wrapper around Google Cloud BigQuery with Polars integration. Simplifies querying and data ingestion with a unified interface, supporting read, write, insert, and delete operations on BigQuery tables."
 readme = "README.md"
 authors = [{ name = "FrocketGaming", email = "frocketgames@gmail.com" }]
