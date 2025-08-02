@@ -7,13 +7,155 @@ import re
 import tempfile
 import os
 import configparser
-from concurrent.futures import TimeoutError as FutureTimeoutError
+import fnmatch
+import logging
+import time
+from concurrent.futures import TimeoutError as FutureTimeoutError, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from typing import List, Dict, Optional, Union, Callable, Any
+from dataclasses import dataclass
+from pathlib import Path
+import hashlib
+
+
+# Custom exceptions
+class ZbqError(Exception):
+    """Base exception for zbq package"""
+    pass
+
+
+class ZbqAuthenticationError(ZbqError):
+    """Authentication related errors"""pass
+
+
+class ZbqConfigurationError(ZbqError):
+    """Configuration related errors"""
+    pass
+
+
+class ZbqOperationError(ZbqError):
+    """Operation related errors"""
+    pass
+
+
+# Data classes for tracking operations
+@dataclass
+class UploadResult:
+    """Result of upload operations"""
+    total_files: int
+    uploaded_files: int
+    skipped_files: int
+    failed_files: int
+    total_bytes: int
+    duration: float
+    errors: List[str]
+
+
+@dataclass
+class DownloadResult:
+    """Result of download operations"""
+    total_files: int
+    downloaded_files: int
+    failed_files: int
+    total_bytes: int
+    duration: float
+    errors: List[str]
+
+
+# Configure logging
+def setup_logging(level: str = "INFO") -> logging.Logger:
+    """Set up structured logging for zbq operations"""
+    logger = logging.getLogger("zbq")
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    
+    logger.setLevel(getattr(logging, level.upper()))
+    return logger
+
+
+def retry_operation(operation: Callable, max_retries: int = 3, delay: float = 1.0, 
+                   backoff_factor: float = 2.0) -> Any:
+    """Retry an operation with exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(delay * (backoff_factor ** attempt))
+    return None
+
+
+def match_patterns(filename: str, include_patterns: Optional[Union[str, List[str]]] = None,
+                  exclude_patterns: Optional[Union[str, List[str]]] = None,
+                  case_sensitive: bool = True, use_regex: bool = False) -> bool:
+    """
+    Check if filename matches include patterns and doesn't match exclude patterns
+    
+    Args:
+        filename: Name of file to check
+        include_patterns: Pattern(s) to include (None means include all)
+        exclude_patterns: Pattern(s) to exclude (None means exclude none)
+        case_sensitive: Whether pattern matching is case sensitive
+        use_regex: Whether to use regex instead of glob patterns
+    
+    Returns:
+        True if file should be processed, False otherwise
+    """
+    if not case_sensitive:
+        filename = filename.lower()
+    
+    # Convert single patterns to lists
+    if isinstance(include_patterns, str):
+        include_patterns = [include_patterns]
+    if isinstance(exclude_patterns, str):
+        exclude_patterns = [exclude_patterns]
+    
+    # Apply case insensitivity to patterns
+    if not case_sensitive:
+        if include_patterns:
+            include_patterns = [p.lower() for p in include_patterns]
+        if exclude_patterns:
+            exclude_patterns = [p.lower() for p in exclude_patterns]
+    
+    # Check include patterns
+    if include_patterns:
+        included = False
+        for pattern in include_patterns:
+            if use_regex:
+                if re.match(pattern, filename):
+                    included = True
+                    break
+            else:
+                if fnmatch.fnmatch(filename, pattern):
+                    included = True
+                    break
+        if not included:
+            return False
+    
+    # Check exclude patterns
+    if exclude_patterns:
+        for pattern in exclude_patterns:
+            if use_regex:
+                if re.match(pattern, filename):
+                    return False
+            else:
+                if fnmatch.fnmatch(filename, pattern):
+                    return False
+    
+    return True
 
 
 class BaseClientManager:
-    def __init__(self):
-        pass
+    def __init__(self, project_id: str = "", log_level: str = "INFO"):
+        self._project_id = project_id.strip() or self._get_default_project()
+        self.logger = setup_logging(log_level)
+        self._client = None
 
     def _create_client(self):
         raise NotImplementedError("Subclasses must implement _create_client()")
@@ -21,28 +163,28 @@ class BaseClientManager:
     @contextmanager
     def _fresh_client(self):
         """Context manager that provides a fresh client for each operation.
-        
+
         This eliminates shared client state issues by creating a new client
         for each operation and ensuring proper cleanup.
         """
         temp_client = None
         try:
             if not self._check_adc():
-                raise RuntimeError(
+                raise ZbqAuthenticationError(
                     "No Google Cloud credentials found. Run:\n"
                     "  gcloud auth application-default login\n"
                     "Or set the GOOGLE_APPLICATION_CREDENTIALS environment variable."
                 )
             if not self.project_id:
-                raise RuntimeError(
+                raise ZbqConfigurationError(
                     "No GCP project found. Set one via:\n"
                     "  gcloud config set project YOUR_PROJECT_ID\n"
                     "Or set manually: zclient.project_id = 'your-project'"
                 )
-            
+
             temp_client = self._create_client()
             yield temp_client
-            
+
         finally:
             if temp_client:
                 try:
@@ -96,53 +238,362 @@ class BaseClientManager:
 
 
 class StorageHandler(BaseClientManager):
-    def __init__(self, project_id: str = ""):
-        self._project_id = project_id.strip() or self._get_default_project()
+    """Enhanced Google Cloud Storage handler with pattern matching and progress tracking"""
+    
+    def __init__(self, project_id: str = "", log_level: str = "INFO", max_workers: int = 4):
+        super().__init__(project_id, log_level)
+        self.max_workers = max_workers
 
-    def upload(self, local_dir: str, bucket_name: str):
-        with self._fresh_client() as client:
-            bucket = client.get_bucket(bucket_name)
-            for root, _, files in os.walk(local_dir):
-                for file in files:
-                    blob = bucket.blob(os.path.join(root, file))
-                    blob.upload_from_filename(os.path.join(root, file))
-
-    def download(
-        self,
-        bucket_name: str,
-        file_name: str,
-        file_extension: str,
-        prefix: str,
-        local_dir: str,
-    ):
+    def upload(self, 
+               local_dir: str, 
+               bucket_name: str, 
+               pattern: Optional[str] = None,  # Legacy parameter for backward compatibility
+               include_patterns: Optional[Union[str, List[str]]] = None,
+               exclude_patterns: Optional[Union[str, List[str]]] = None,
+               case_sensitive: bool = True,
+               use_regex: bool = False,
+               dry_run: bool = False,
+               parallel: bool = True,
+               progress_callback: Optional[Callable[[int, int], None]] = None,
+               max_retries: int = 3) -> UploadResult:
+        """
+        Upload files from local directory to Google Cloud Storage bucket with enhanced pattern matching
+        
+        Args:
+            local_dir: Local directory path to upload from
+            bucket_name: GCS bucket name
+            pattern: Legacy parameter for backward compatibility (use include_patterns instead)
+            include_patterns: Pattern(s) to include (e.g., "*.xlsx", ["*.csv", "*.json"])
+            exclude_patterns: Pattern(s) to exclude (e.g., "temp_*", ["*.tmp", "*.log"])
+            case_sensitive: Whether pattern matching is case sensitive
+            use_regex: Use regex patterns instead of glob patterns
+            dry_run: Preview operation without actual upload
+            parallel: Use parallel uploads for better performance
+            progress_callback: Optional callback function for progress updates
+            max_retries: Number of retry attempts for failed uploads
+            
+        Returns:
+            UploadResult with detailed statistics
+        """
+        # Handle backward compatibility with old 'pattern' parameter
+        if pattern is not None and include_patterns is None:
+            include_patterns = pattern
+        
+        start_time = time.time()
+        local_path = Path(local_dir)
+        
+        if not local_path.exists():
+            raise ZbqOperationError(f"Local directory does not exist: {local_dir}")
+        
+        self.logger.info(f"Starting upload from {local_dir} to bucket {bucket_name}")
+        
+        # Collect files to upload
+        files_to_upload = []
+        total_bytes = 0
+        
+        for root, _, files in os.walk(local_dir):
+            for file in files:
+                if match_patterns(file, include_patterns, exclude_patterns, case_sensitive, use_regex):
+                    local_file_path = Path(root) / file
+                    relative_path = local_file_path.relative_to(local_path)
+                    file_size = local_file_path.stat().st_size
+                    
+                    files_to_upload.append({
+                        'local_path': local_file_path,
+                        'blob_path': str(relative_path),
+                        'size': file_size
+                    })
+                    total_bytes += file_size
+        
+        result = UploadResult(
+            total_files=len(files_to_upload),
+            uploaded_files=0,
+            skipped_files=0,
+            failed_files=0,
+            total_bytes=total_bytes,
+            duration=0.0,
+            errors=[]
+        )
+        
+        if dry_run:
+            self.logger.info(f"DRY RUN: Would upload {len(files_to_upload)} files ({total_bytes:,} bytes)")
+            for file_info in files_to_upload:
+                self.logger.info(f"  Would upload: {file_info['blob_path']} ({file_info['size']:,} bytes)")
+            result.duration = time.time() - start_time
+            return result
+        
+        if not files_to_upload:
+            self.logger.info("No files found matching the specified patterns")
+            result.duration = time.time() - start_time
+            return result
+        
+        # Upload files
+        if parallel and len(files_to_upload) > 1:
+            result = self._upload_parallel(bucket_name, files_to_upload, result, 
+                                         progress_callback, max_retries)
+        else:
+            result = self._upload_sequential(bucket_name, files_to_upload, result, 
+                                           progress_callback, max_retries)
+        
+        result.duration = time.time() - start_time
+        self.logger.info(f"Upload completed: {result.uploaded_files}/{result.total_files} files "
+                        f"in {result.duration:.2f}s")
+        
+        return result
+    
+    def _upload_sequential(self, bucket_name: str, files_to_upload: List[Dict], 
+                          result: UploadResult, progress_callback: Optional[Callable], 
+                          max_retries: int) -> UploadResult:
+        """Upload files sequentially"""
         with self._fresh_client() as client:
             bucket = client.bucket(bucket_name)
-            blobs = bucket.list_blobs(prefix=prefix, max_results=100)
+            
+            for i, file_info in enumerate(files_to_upload):
+                try:
+                    def upload_operation():
+                        blob = bucket.blob(file_info['blob_path'])
+                        blob.upload_from_filename(str(file_info['local_path']))
+                        return True
+                    
+                    retry_operation(upload_operation, max_retries)
+                    result.uploaded_files += 1
+                    self.logger.debug(f"Uploaded: {file_info['blob_path']}")
+                    
+                except Exception as e:
+                    result.failed_files += 1
+                    error_msg = f"Failed to upload {file_info['blob_path']}: {str(e)}"
+                    result.errors.append(error_msg)
+                    self.logger.error(error_msg)
+                
+                if progress_callback:
+                    progress_callback(i + 1, len(files_to_upload))
+        
+        return result
+    
+    def _upload_parallel(self, bucket_name: str, files_to_upload: List[Dict], 
+                        result: UploadResult, progress_callback: Optional[Callable], 
+                        max_retries: int) -> UploadResult:
+        """Upload files in parallel using ThreadPoolExecutor"""
+        completed_files = 0
+        
+        def upload_file(file_info):
+            try:
+                with self._fresh_client() as client:
+                    bucket = client.bucket(bucket_name)
+                    
+                    def upload_operation():
+                        blob = bucket.blob(file_info['blob_path'])
+                        blob.upload_from_filename(str(file_info['local_path']))
+                        return True
+                    
+                    retry_operation(upload_operation, max_retries)
+                    return {'success': True, 'file_info': file_info, 'error': None}
+                    
+            except Exception as e:
+                return {'success': False, 'file_info': file_info, 'error': str(e)}
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_file = {executor.submit(upload_file, file_info): file_info 
+                             for file_info in files_to_upload}
+            
+            for future in as_completed(future_to_file):
+                upload_result = future.result()
+                completed_files += 1
+                
+                if upload_result['success']:
+                    result.uploaded_files += 1
+                    self.logger.debug(f"Uploaded: {upload_result['file_info']['blob_path']}")
+                else:
+                    result.failed_files += 1
+                    error_msg = f"Failed to upload {upload_result['file_info']['blob_path']}: {upload_result['error']}"
+                    result.errors.append(error_msg)
+                    self.logger.error(error_msg)
+                
+                if progress_callback:
+                    progress_callback(completed_files, len(files_to_upload))
+        
+        return result
 
+    def download(self,
+                bucket_name: str,
+                local_dir: str,
+                prefix: str = "",
+                include_patterns: Optional[Union[str, List[str]]] = None,
+                exclude_patterns: Optional[Union[str, List[str]]] = None,
+                case_sensitive: bool = True,
+                use_regex: bool = False,
+                dry_run: bool = False,
+                parallel: bool = True,
+                progress_callback: Optional[Callable[[int, int], None]] = None,
+                max_retries: int = 3,
+                max_results: int = 1000) -> DownloadResult:
+        """
+        Download files from Google Cloud Storage bucket with enhanced pattern matching
+        
+        Args:
+            bucket_name: GCS bucket name
+            local_dir: Local directory to download files to
+            prefix: Prefix to filter objects in bucket
+            include_patterns: Pattern(s) to include (e.g., "*.xlsx", ["*.csv", "*.json"])
+            exclude_patterns: Pattern(s) to exclude (e.g., "temp_*", ["*.tmp", "*.log"])
+            case_sensitive: Whether pattern matching is case sensitive
+            use_regex: Use regex patterns instead of glob patterns
+            dry_run: Preview operation without actual download
+            parallel: Use parallel downloads for better performance
+            progress_callback: Optional callback function for progress updates
+            max_retries: Number of retry attempts for failed downloads
+            max_results: Maximum number of blobs to list from bucket
+            
+        Returns:
+            DownloadResult with detailed statistics
+        """
+        start_time = time.time()
+        local_path = Path(local_dir)
+        local_path.mkdir(parents=True, exist_ok=True)
+        
+        self.logger.info(f"Starting download from bucket {bucket_name} to {local_dir}")
+        
+        # List and filter blobs
+        blobs_to_download = []
+        total_bytes = 0
+        
+        with self._fresh_client() as client:
+            bucket = client.bucket(bucket_name)
+            blobs = bucket.list_blobs(prefix=prefix, max_results=max_results)
+            
             for blob in blobs:
-                # Compute relative path
-                relative_path = blob.name[len(prefix) :]
-                if not relative_path:  # skip "directory marker" blobs
-                    continue
-                local_path = os.path.join(local_dir, relative_path)
-
-                # Ensure the directory exists
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-
-                blob.download_to_filename(local_path)
+                if not blob.name or blob.name.endswith('/'):
+                    continue  # Skip directory markers
+                
+                blob_filename = Path(blob.name).name
+                if match_patterns(blob_filename, include_patterns, exclude_patterns, case_sensitive, use_regex):
+                    relative_path = blob.name[len(prefix):] if prefix else blob.name
+                    local_file_path = local_path / relative_path
+                    
+                    blobs_to_download.append({
+                        'blob': blob,
+                        'local_path': local_file_path,
+                        'size': blob.size or 0
+                    })
+                    total_bytes += blob.size or 0
+        
+        result = DownloadResult(
+            total_files=len(blobs_to_download),
+            downloaded_files=0,
+            failed_files=0,
+            total_bytes=total_bytes,
+            duration=0.0,
+            errors=[]
+        )
+        
+        if dry_run:
+            self.logger.info(f"DRY RUN: Would download {len(blobs_to_download)} files ({total_bytes:,} bytes)")
+            for blob_info in blobs_to_download:
+                self.logger.info(f"  Would download: {blob_info['blob'].name} -> {blob_info['local_path']}")
+            result.duration = time.time() - start_time
+            return result
+        
+        if not blobs_to_download:
+            self.logger.info("No files found matching the specified patterns")
+            result.duration = time.time() - start_time
+            return result
+        
+        # Download files
+        if parallel and len(blobs_to_download) > 1:
+            result = self._download_parallel(blobs_to_download, result, progress_callback, max_retries)
+        else:
+            result = self._download_sequential(blobs_to_download, result, progress_callback, max_retries)
+        
+        result.duration = time.time() - start_time
+        self.logger.info(f"Download completed: {result.downloaded_files}/{result.total_files} files "
+                        f"in {result.duration:.2f}s")
+        
+        return result
+    
+    def _download_sequential(self, blobs_to_download: List[Dict], result: DownloadResult,
+                           progress_callback: Optional[Callable], max_retries: int) -> DownloadResult:
+        """Download files sequentially"""
+        for i, blob_info in enumerate(blobs_to_download):
+            try:
+                # Ensure directory exists
+                blob_info['local_path'].parent.mkdir(parents=True, exist_ok=True)
+                
+                def download_operation():
+                    blob_info['blob'].download_to_filename(str(blob_info['local_path']))
+                    return True
+                
+                retry_operation(download_operation, max_retries)
+                result.downloaded_files += 1
+                self.logger.debug(f"Downloaded: {blob_info['blob'].name}")
+                
+            except Exception as e:
+                result.failed_files += 1
+                error_msg = f"Failed to download {blob_info['blob'].name}: {str(e)}"
+                result.errors.append(error_msg)
+                self.logger.error(error_msg)
+            
+            if progress_callback:
+                progress_callback(i + 1, len(blobs_to_download))
+        
+        return result
+    
+    def _download_parallel(self, blobs_to_download: List[Dict], result: DownloadResult,
+                          progress_callback: Optional[Callable], max_retries: int) -> DownloadResult:
+        """Download files in parallel using ThreadPoolExecutor"""
+        completed_files = 0
+        
+        def download_file(blob_info):
+            try:
+                # Ensure directory exists
+                blob_info['local_path'].parent.mkdir(parents=True, exist_ok=True)
+                
+                def download_operation():
+                    blob_info['blob'].download_to_filename(str(blob_info['local_path']))
+                    return True
+                
+                retry_operation(download_operation, max_retries)
+                return {'success': True, 'blob_info': blob_info, 'error': None}
+                
+            except Exception as e:
+                return {'success': False, 'blob_info': blob_info, 'error': str(e)}
+        
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_blob = {executor.submit(download_file, blob_info): blob_info 
+                             for blob_info in blobs_to_download}
+            
+            for future in as_completed(future_to_blob):
+                download_result = future.result()
+                completed_files += 1
+                
+                if download_result['success']:
+                    result.downloaded_files += 1
+                    self.logger.debug(f"Downloaded: {download_result['blob_info']['blob'].name}")
+                else:
+                    result.failed_files += 1
+                    error_msg = f"Failed to download {download_result['blob_info']['blob'].name}: {download_result['error']}"
+                    result.errors.append(error_msg)
+                    self.logger.error(error_msg)
+                
+                if progress_callback:
+                    progress_callback(completed_files, len(blobs_to_download))
+        
+        return result
 
     def _create_client(self):
         return storage.Client(project=self.project_id)
 
 
 class BigQueryHandler(BaseClientManager):
+    """Enhanced Google BigQuery handler with improved error handling and logging"""
+    
     def __init__(
         self,
         project_id: str = "",
         default_timeout: int = 300,
         interactive_mode: bool = True,
+        log_level: str = "INFO",
     ):
-        self._project_id = project_id.strip() or self._get_default_project()
+        super().__init__(project_id, log_level)
         self.default_timeout = default_timeout
         self.interactive_mode = interactive_mode
 
@@ -252,7 +703,9 @@ class BigQueryHandler(BaseClientManager):
                         )
                     except Exception as e:
                         if "timeout" in str(e).lower():
-                            raise TimeoutError(f"Query timed out after {timeout} seconds")
+                            raise TimeoutError(
+                                f"Query timed out after {timeout} seconds"
+                            )
                         raise
 
                 try:
