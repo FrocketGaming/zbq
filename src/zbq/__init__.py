@@ -1,13 +1,10 @@
-from .main import (
-    BigQueryHandler, 
-    StorageHandler, 
-    UploadResult, 
-    DownloadResult,
+from .main import BigQueryHandler
+from .storage import StorageHandler, UploadResult, DownloadResult
+from .base import (
     ZbqError,
     ZbqAuthenticationError,
     ZbqConfigurationError,
     ZbqOperationError,
-    setup_logging
 )
 
 zclient = BigQueryHandler()
@@ -24,5 +21,4 @@ __all__ = [
     "ZbqAuthenticationError", 
     "ZbqConfigurationError",
     "ZbqOperationError",
-    "setup_logging"
 ]

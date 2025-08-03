@@ -205,7 +205,6 @@ storage = StorageHandler(
 bq = BigQueryHandler(
     project_id="my-project",
     default_timeout=600,  # 10 minute timeout
-    interactive_mode=False,  # Disable confirmation prompts
     log_level="DEBUG"
 )
 ```
